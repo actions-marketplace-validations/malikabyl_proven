@@ -47,8 +47,15 @@ def run(tmp_path, src, toml=BASE_TOML, extra=None):
 # ---------------------------------------------------------------- P1
 
 def test_p1_invented_package(tmp_path):
-    issues = run(tmp_path, "import anthropik\n")
+    issues = run(tmp_path, "import anthropik\n", extra={"requirements.txt": "httpx==0.27.0\n"})
     assert any("anthropik" in m for m in codes(issues, "P1"))
+
+
+def test_p1_missing_requirements_is_one_issue(tmp_path):
+    issues = run(tmp_path, "import anthropik\nimport httpx\n")
+    messages = codes(issues, "P1")
+    assert len(messages) == 1
+    assert "no requirements file found" in messages[0] and "2 external import(s)" in messages[0]
 
 
 def test_p1_unpinned_and_pinned(tmp_path):
@@ -197,7 +204,9 @@ def test_p4_taint_through_helper_and_annotations(tmp_path):
         for part in ask(q).split():
             save(part)
     """
-    assert len(codes(run(tmp_path, src), "P4")) == 2
+    messages = codes(run(tmp_path, src), "P4")
+    assert len(messages) == 3
+    assert any('public function "ask" returns unverified' in m for m in messages)
 
 
 def test_p4_reassignment_clears_and_forgery_is_caught(tmp_path):
@@ -478,3 +487,81 @@ def test_cli_mcp(monkeypatch, capsys):
     monkeypatch.setattr(sys, "stdin", io.StringIO('{"jsonrpc": "2.0", "id": 7, "method": "ping"}\n'))
     assert main(["mcp", "--no-installed-check"]) == 0
     assert json.loads(capsys.readouterr().out) == {"jsonrpc": "2.0", "id": 7, "result": {}}
+
+
+# ---------------------------------------------------------------- 0.2.0: field test on a real project
+
+def fake_venv(root, packages):
+    """A project .venv with packages: {distribution: (module, version, source)}."""
+    (root / ".venv").mkdir()
+    (root / ".venv" / "pyvenv.cfg").write_text("home = /usr/bin\n", encoding="utf-8")
+    site = root / ".venv" / "lib" / "python3.12" / "site-packages"
+    for dist, (module, version, source) in packages.items():
+        (site / module).mkdir(parents=True)
+        (site / module / "__init__.py").write_text(source, encoding="utf-8")
+        info = site / f"{dist.replace('-', '_')}-{version}.dist-info"
+        info.mkdir()
+        (info / "METADATA").write_text(f"Metadata-Version: 2.1\nName: {dist}\nVersion: {version}\n", encoding="utf-8")
+        (info / "RECORD").write_text(f"{module}/__init__.py,,\n{info.name}/METADATA,,\n", encoding="utf-8")
+
+
+def test_project_root_without_proven_toml(tmp_path):
+    (tmp_path / "requirements.txt").write_text("", encoding="utf-8")
+    (tmp_path / "tools").mkdir()
+    assert load_config(tmp_path / "tools").root == tmp_path.resolve()
+
+
+def test_project_venv_and_distribution_names(tmp_path):
+    (tmp_path / "requirements.txt").write_text("python-dotenv==1.0.1\nrequests==2.32.3\n", encoding="utf-8")
+    fake_venv(tmp_path, {"python-dotenv": ("dotenv", "1.0.1", "def load_dotenv():\n    return True\n"),
+                         "requests": ("requests", "2.32.3", "from .api import get, post\n")})
+    (tmp_path / "tools").mkdir()
+    (tmp_path / "tools" / "app.py").write_text(
+        "import dotenv\nimport requests\ndotenv.load_dotenv()\nrequests.get('x')\nrequests.gett('x')\n", encoding="utf-8")
+    cfg = load_config(tmp_path / "tools")
+    cfg.disable.append("P6")
+    issues = check(cfg, [str(tmp_path / "tools")])
+    assert codes(issues, "P1") == []
+    assert codes(issues, "P2") == ['module "requests" has no name "gett"']
+    m = proven.measured(cfg)
+    assert m["requirements"] == ["requirements.txt"] and m["environments"] == [".venv"]
+    assert "packages from: the judge's own + .venv" in proven.format_measured(m)
+
+
+def test_measured_warns_without_project_environment(tmp_path):
+    cfg = project(tmp_path, {"src/app.py": "X = 1\n"})
+    cfg.check_installed = True
+    line = proven.format_measured(proven.measured(cfg))
+    assert "requirements: none found (looked for requirements.txt)" in line
+    assert "run the judge with the project's Python" in line
+
+
+def test_p3_local_hosts_are_not_facts(tmp_path):
+    src = 'A = "http://127.0.0.1:8000/ask"\nB = "http://localhost/x"\nC = "http://printer.local/"\nD = "https://example.org/"\n'
+    assert codes(run(tmp_path, src), "P3") == ['address "example.org" typed by hand — move it to a config or allowed_url_hosts']
+
+
+def test_p5_waiver_inside_the_handler(tmp_path):
+    src = """
+    try:
+        x = 1
+    except OSError:
+        pass  # proven: allow P5: logging a call must not break the answer
+    try:
+        x = 2
+    except OSError:
+        pass  # proven: allow P5
+    """
+    issues = run(tmp_path, src)
+    assert len(codes(issues, "P5")) == 1 and codes(issues, "P0") == ["waiver of P5 without a reason"]
+
+
+def test_p6_project_without_tests_is_one_issue(tmp_path):
+    cfg = project(tmp_path, {"src/app.py": "def a():\n    return 1\n\ndef b():\n    return 2\n\nclass C:\n    pass\n"})
+    assert codes(check(cfg), "P6") == ['no tests found in tests: 3 public function(s) and class(es) are not proven — '
+                                       'write tests, or set disable = ["P6"] in proven.toml until there are some']
+
+
+def test_p4_annotated_return_is_fine(tmp_path):
+    src = "def ask(q) -> Unverified:\n    return llm(q)\n\ndef _inner(q):\n    return llm(q)\n"
+    assert codes(run(tmp_path, src), "P4") == []

@@ -47,11 +47,14 @@ The judge:
 
 ```
 $ python proven.py check examples/bad
+Proven 0.2.0 · root: /path/to/proven/examples · python: /usr/bin/python3 3.12.3 · requirements: requirements.txt · packages from: the judge's own
+
 bad/bot.py:4:1  P1  package "anthropik" is not in requirements.txt — it may be invented
 bad/bot.py:5:1  P1  version of "requests" is not pinned with == (now: ">=2.31")
 bad/bot.py:7:1  P3  "MRP" is a number typed from memory — it needs a dated source
 bad/bot.py:9:10  P3  address "adilet.zan.kz" typed by hand — move it to a config or allowed_url_hosts
 bad/bot.py:12:1  P6  function "llm" is not called in any test
+bad/bot.py:16:5  P4  public function "llm" returns unverified model output — annotate it "-> Unverified" or return verify(...)
 bad/bot.py:19:1  P6  function "send" is not called in any test
 bad/bot.py:23:1  P6  function "handle" is not called in any test
 bad/bot.py:25:14  P3  law article number typed by hand: "Article 46" — take it from the database
@@ -63,7 +66,7 @@ How to fix:
   P1 Imports are real — Check the exact package name on PyPI, add a name==version line ...
   ...
 
-Proven: 11 issue(s) in 1 file(s). Code rejected.
+Proven: 12 issue(s) in 1 file(s). Code rejected.
 ```
 
 The same bot fixed according to the rules — [`examples/good/bot.py`](examples/good/bot.py):
@@ -103,7 +106,7 @@ proven rules                    # list the rules
 proven explain P4               # explain a rule
 ```
 
-In your code, `from proven_types import Fact, Unverified, unverified, verify`, and add `proven-judge==0.1.0` to `requirements.txt` (P1 applies to Proven too).
+In your code, `from proven_types import Fact, Unverified, unverified, verify`, and add `proven-judge==0.2.0` to `requirements.txt` (P1 applies to Proven too).
 
 No installation at all: copy `proven.py` and `proven_types.py` into your project and run `python proven.py check`.
 
@@ -113,7 +116,7 @@ No installation at all: copy `proven.py` and `proven_types.py` into your project
 # .pre-commit-config.yaml
 repos:
   - repo: https://github.com/malikabyl/proven
-    rev: v0.1.0
+    rev: v0.2.0
     hooks:
       - id: proven
 ```
@@ -124,7 +127,7 @@ The hook checks the whole project, not only the changed files: P6 needs to see t
 
 ```yaml
 - uses: actions/checkout@v4
-- uses: malikabyl/proven@v0.1.0
+- uses: malikabyl/proven@v0.2.0
 ```
 
 Issues show up as annotations on the lines of the pull request and in the job summary. Inputs: `path` (the folder to run in), `args` (extra arguments for `proven check`), `python` (the interpreter with your dependencies installed, so P1 and P2 can see them; by default `python3`). Outside the action, `proven check --github` gives the same annotations.
@@ -174,6 +177,10 @@ python proven.py baseline
 
 The current issues are written to `.proven-baseline.json` as old debt. From then on the judge skips them but rejects any new issue. Pay the debt off gradually and rewrite the baseline.
 
+**Run the judge with the project's Python.** P1 and P2 look at installed packages. The first line of every report says what the judge measured with: the project root, the Python, the requirements file and the environments it read. Without `proven.toml` the root is the nearest folder with `pyproject.toml`, `requirements.txt` or `.git`. If the judge runs in its own environment, it also reads the project's `.venv` (or `venv`, `env`, `$VIRTUAL_ENV`): packages there count as installed, and names in them are checked by reading their code, without importing it.
+
+A project with no tests at all gets one P6 issue instead of one per function. Until there are tests, `disable = ["P6"]` keeps the report readable.
+
 ## Waivers
 
 The human has the final say. A rule can be switched off for one line — but only with a reason:
@@ -182,7 +189,14 @@ The human has the final say. A rule can be switched off for one line — but onl
 MRP = 3932  # proven: allow P3: computing an archived 2025 fine
 ```
 
-A waiver without a reason is itself an issue (P0). The comment goes on the same line or on the line above. The Russian keyword works too: `# proven: разрешить P3: reason`.
+A waiver without a reason is itself an issue (P0). The comment goes on the same line or on the line above. For P5 it can also go inside the handler, where the explanation usually is:
+
+```python
+except OSError:
+    pass  # proven: allow P5: logging a call must not break the answer to the client
+```
+
+A plain comment is not enough on purpose: a model can write "# intentional" as easily as "pass". The Russian keyword works too: `# proven: разрешить P3: reason`.
 
 ## Honest limits
 
@@ -190,8 +204,8 @@ The judge catches what is **invented**, not what is **wrong**:
 
 - **P3** checks that a fact has a source and a recent date, not that the value matches the law. Comparing it with the source is up to a person or to the check in `verify()`.
 - **P2** checks names in modules and classes. Methods on objects (`response.jsonn()`) cannot be checked statically — tests catch them (P6).
-- **P2** imports installed packages to look inside, which runs their import code. Turn it off with `check_attributes = false`.
-- **P4** follows data inside a file and through functions by name. It is cautious: when in doubt, it treats data as unverified.
+- **P2** imports packages installed in the judge's own environment to look inside, which runs their import code; packages from the project's `.venv` are read, not imported. Turn it off with `check_attributes = false`.
+- **P4** follows data inside a file and through functions by name. It is cautious: when in doubt, it treats data as unverified. A public function that returns model output must say so with `-> Unverified`. A model client created in another file is only recognised if its function name is listed in `sources`.
 - **P6** matches functions and tests by name, not by module.
 - Logic that is wrong but consistent will not be caught by any static judge. Tests and your final word catch it.
 
@@ -202,6 +216,7 @@ proven.py             the judge (CLI)
 proven_types.py       Unverified, Verified, verify(), Fact
 proven.toml           settings (the judge checks itself)
 SPEC.md               the rules in detail and every setting
+CHANGELOG.md          what changed in each version
 PROMPT.md             a cheat sheet for an AI model
 examples/bad          code with hallucinations
 examples/good         the same code following the rules

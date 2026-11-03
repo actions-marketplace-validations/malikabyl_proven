@@ -1,6 +1,6 @@
 # Proven — specification
 
-Version 0.1.0.
+Version 0.2.0.
 
 Proven is Python plus a judge. The syntax does not change: any Proven code is plain Python. What changes is which code counts as **accepted**.
 
@@ -27,7 +27,9 @@ import requests         # P1: if requirements say "requests>=2.31"
 
 **Not checked:** an import inside `try ... except ImportError` — that is an optional dependency.
 
-**Import name ≠ package name.** `import yaml` is installed as `pyyaml`, `import bs4` as `beautifulsoup4`. The common cases are built in; add your own in `[proven.import_map]`.
+**Import name ≠ package name.** `import yaml` is installed as `pyyaml`, `import bs4` as `beautifulsoup4`. The judge reads this from the metadata of installed packages (in its own environment and in the project's `.venv`); the common cases are also built in, and your own go in `[proven.import_map]`.
+
+**Which environment.** A package counts as installed if it is in the judge's environment or in the project's virtual environment (`$VIRTUAL_ENV`, or `.venv`, `venv`, `env` in the project root). If no requirements file is found at all, that is one issue for the project, not one per import.
 
 ---
 
@@ -50,7 +52,7 @@ Code that does not parse as Python is P2 too: it is a construct from another lan
 - names shadowed by a local variable or a parameter;
 - modules with dynamic attributes (`__getattr__`).
 
-**Safety.** To look inside a package, the judge imports it — only the standard library and installed packages, never your own code. Turn it off with `check_attributes = false`.
+**Safety.** To look inside a package from its own environment, the judge imports it — only the standard library and installed packages, never your own code. Packages from the project's `.venv` are read as source code, not imported; a package with `__getattr__` or `import *` at its top is not judged. Turn P2 off with `check_attributes = false`.
 
 ---
 
@@ -72,7 +74,7 @@ Real-world values are not typed into code as literals.
 
 4. **Law article numbers.** A string with `Art. 46`, `Article 46`, `§ 46`, the Russian `ст. 46`, `статья 46`, `статьи 46` or the Kazakh `46-бап`, `бап 46` is an issue: the article number comes from the database.
 
-5. **Addresses.** A string with `http://` or `https://` is an issue if its domain is not in `allowed_url_hosts`.
+5. **Addresses.** A string with `http://` or `https://` is an issue if its domain is not in `allowed_url_hosts`. Local addresses are always allowed: `localhost`, `127.0.0.1`, `0.0.0.0`, `*.localhost`, `*.local`.
 
 **Not checked:** docstrings and strings inside `Fact(...)`.
 
@@ -92,6 +94,8 @@ send(phone, verify(raw, check))  # accepted
 ```
 
 **Forgery.** `Verified(...)` can only be created inside `verify()`. A direct `Verified(...)` call in code is P4.
+
+**Returning it.** A public function (no `_` in front) that returns unverified data must be annotated `-> Unverified`, so that whoever calls it knows. Otherwise it is P4: the boundary of a module is where an answer leaves for a web handler, a bot or a print.
 
 **How the judge recognises unverified data:**
 - a call to a source function (`sources`): `llm`, `ask_llm`, `call_llm`, `ask_claude`, `unverified`, `dify_chat`, `*.messages.create`, `*.chat.completions.create`, `*.responses.create`;
@@ -150,6 +154,8 @@ except json.JSONDecodeError:  # accepted
 
 Tests are looked for in the `tests` folders (files `test_*.py` and `*_test.py`).
 
+5. If there are no test files at all, P6 is one issue for the project ("no tests found …") instead of one per function.
+
 **Limit.** Functions and tests are matched by name. Class methods are not required separately.
 
 ---
@@ -162,7 +168,7 @@ MRP = 3932  # proven: allow P3: computing an archived 2025 fine
 # proven: allow P5: the external SDK throws anything, we log it above
 ```
 
-- The comment goes on the same line or on the line above.
+- The comment goes on the same line or on the line above. A P5 waiver may also go inside the `except` handler.
 - The reason is at least 5 characters long. Without a reason it is a P0 issue.
 - The Russian keyword works too: `# proven: разрешить P3: reason`.
 
@@ -218,7 +224,7 @@ disable = []                       # for example ["P6"]
 | `proven.py init` | Create `proven.toml` |
 | `proven.py mcp` | Run as an MCP server over stdio (`--no-installed-check` skips P1's installed check) |
 
-Report line format: `path:line:column  code  message`. At the end, how to fix each rule that came up.
+The report starts with one line on what the judge measured with: the project root, the Python, the requirements files and the environments it read packages from (`measured` in `--json`). Then lines in the format `path:line:column  code  message`, and at the end, how to fix each rule that came up.
 
 ### Claude Code hooks
 

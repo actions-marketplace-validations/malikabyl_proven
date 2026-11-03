@@ -20,7 +20,9 @@ from __future__ import annotations
 import argparse
 import ast
 import contextlib
+import functools
 import importlib
+import importlib.metadata
 import importlib.util
 import io
 import json
@@ -35,7 +37,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 
 # code: (title, what it means, how to fix)
 RULES: dict[str, tuple[str, str, str]] = {
@@ -120,6 +122,13 @@ DEFAULT_FACT_NAMES = [
     "MRP", "MZP", "МРП", "МЗП", "VAT", "НДС", "TAX", "НАЛОГ",
     "СТАВКА", "TAX_RATE", "INTEREST_RATE",
 ]
+
+# A folder with one of these is a project root when there is no proven.toml.
+PROJECT_MARKERS = ("pyproject.toml", "setup.cfg", "setup.py", "requirements.txt", ".git")
+# Virtual environments of the project, looked for in its root.
+VENV_DIRS = (".venv", "venv", "env")
+# Local addresses are not facts from memory (P3).
+LOCAL_HOSTS = ["localhost", "127.0.0.1", "0.0.0.0", "local"]
 
 DEFAULT_SOURCES = [
     "llm", "ask_llm", "call_llm", "ask_claude", "unverified", "dify_chat",
@@ -238,7 +247,7 @@ def load_config(start: str | Path = ".", today: date | None = None) -> Config:
     start = Path(start).resolve()
     base = start if start.is_dir() else start.parent
     found = next((d / "proven.toml" for d in (base, *base.parents) if (d / "proven.toml").is_file()), None)
-    cfg = Config(root=found.parent if found else base)
+    cfg = Config(root=found.parent if found else _project_root(base))
     if today is not None:
         cfg.today = today
     if found is None:
@@ -266,6 +275,104 @@ def load_config(start: str | Path = ".", today: date | None = None) -> Config:
     cfg.taint_sanitizers += _str_list(taint.get("sanitizers", []), "taint.sanitizers")
     cfg.disable = [_norm_code(c) for c in _str_list(data.get("rules", {}).get("disable", []), "rules.disable")]
     return cfg
+
+
+def _project_root(base: Path) -> Path:
+    """Without proven.toml: the nearest folder that looks like a project root."""
+    for d in (base, *base.parents):
+        if any((d / m).exists() for m in PROJECT_MARKERS):
+            return d
+    return base
+
+
+# ---------------------------------------------------------------- the project's environment
+
+def _project_envs(root: Path) -> list[tuple[Path, list[Path]]]:
+    """The project's virtual environments other than the judge's own: (venv, its site-packages)."""
+    own = Path(sys.prefix).resolve()
+    candidates = [Path(os.environ["VIRTUAL_ENV"])] if os.environ.get("VIRTUAL_ENV") else []
+    candidates += [root / d for d in VENV_DIRS]
+    envs: list[tuple[Path, list[Path]]] = []
+    seen: set[Path] = set()
+    for venv in candidates:
+        if not (venv / "pyvenv.cfg").is_file():
+            continue
+        venv = venv.resolve()
+        if venv == own or venv in seen:
+            continue
+        seen.add(venv)
+        sites = sorted(venv.glob("lib/python3*/site-packages")) + [s for s in [venv / "Lib" / "site-packages"] if s.is_dir()]
+        if sites:
+            envs.append((venv, sites))
+    return envs
+
+
+def _dist_name(info: Path) -> str | None:
+    meta = info / "METADATA"
+    if not meta.is_file():
+        return None
+    for line in meta.read_text(encoding="utf-8", errors="replace").splitlines():
+        if not line.strip():
+            break
+        if line.lower().startswith("name:"):
+            return line.split(":", 1)[1].strip()
+    return None
+
+
+def _dist_tops(info: Path) -> set[str]:
+    top_level = info / "top_level.txt"
+    if top_level.is_file():
+        return set(top_level.read_text(encoding="utf-8", errors="replace").split())
+    tops: set[str] = set()
+    record = info / "RECORD"
+    if record.is_file():
+        for line in record.read_text(encoding="utf-8", errors="replace").splitlines():
+            first = line.split(",", 1)[0].split("/", 1)[0]
+            if first and not first.endswith((".dist-info", ".data")) and first not in ("..", "__pycache__", "bin"):
+                tops.add(first[:-3] if first.endswith(".py") else first.split(".")[0])
+    return tops
+
+
+@functools.lru_cache(maxsize=1)
+def _own_dists() -> dict[str, frozenset[str]]:
+    """Import name -> distributions in the judge's own environment (read once)."""
+    return {top: frozenset(_norm_pkg(d) for d in dists)
+            for top, dists in importlib.metadata.packages_distributions().items()}
+
+
+def _dist_map(sites: list[Path]) -> dict[str, set[str]]:
+    """Import name -> distribution names, from the judge's environment and the project's."""
+    out: dict[str, set[str]] = {top: set(dists) for top, dists in _own_dists().items()}
+    for site in sites:
+        for info in site.glob("*.dist-info"):
+            name = _dist_name(info)
+            if name:
+                for top in _dist_tops(info):
+                    out.setdefault(top, set()).add(_norm_pkg(name))
+    return out
+
+
+def measured(cfg: Config) -> dict[str, object]:
+    """What the judge measures with: the project root, Python, requirements and environments."""
+    envs = _project_envs(cfg.root)
+    return {
+        "root": cfg.root.as_posix(),
+        "python": f"{sys.executable} {sys.version.split()[0]}",
+        "requirements": [r for r in cfg.requirements if (cfg.root / r).is_file()],
+        "requirements_missing": [r for r in cfg.requirements if not (cfg.root / r).is_file()],
+        "environments": [_rel(venv, cfg.root) for venv, _ in envs],
+        "check_installed": cfg.check_installed,
+    }
+
+
+def format_measured(m: dict[str, object]) -> str:
+    """One line: what the judge measured with, so a false alarm can be traced to its cause."""
+    reqs = ", ".join(m["requirements"]) or f"none found (looked for {', '.join(m['requirements_missing'])})"
+    envs = ["the judge's own", *m["environments"]]
+    line = f"Proven {VERSION} · root: {m['root']} · python: {m['python']} · requirements: {reqs} · packages from: {' + '.join(envs)}"
+    if m["check_installed"] and not m["environments"]:
+        line += " · if P1 says a package is not installed, run the judge with the project's Python"
+    return line
 
 
 # ---------------------------------------------------------------- files
@@ -377,8 +484,13 @@ class _Project:
         self.cfg = cfg
         self.local = self._local_modules()
         self.reqs = self._requirements()
+        self.req_files = [r for r in cfg.requirements if (cfg.root / r).is_file()]
+        self.sites = [s for _, sites in _project_envs(cfg.root) for s in sites]
+        self.dists = _dist_map(self.sites)
+        self.no_requirements: list[tuple[str, int, int]] = []
         self._mods: dict[str, object] = {}
         self._names: dict[str, set[str] | None] = {}
+        self._site_names: dict[str, set[str] | None] = {}
 
     def _local_modules(self) -> set[str]:
         names = set(self.cfg.local_modules)
@@ -406,16 +518,54 @@ class _Project:
     def external(self, top: str) -> bool:
         return top not in sys.stdlib_module_names and top not in self.local
 
-    def installed(self, top: str) -> bool:
+    @staticmethod
+    def _own(top: str) -> bool:
+        """Importable in the judge's own environment."""
         try:
             return importlib.util.find_spec(top) is not None
         except (ImportError, ValueError):
             return False
 
+    def installed(self, top: str) -> bool:
+        """Installed in the judge's environment or in the project's own."""
+        return self._own(top) or self._site_file(top) is not None
+
+    def _site_file(self, dotted: str) -> Path | None:
+        """A module in the project's site-packages: its .py file, a package's __init__.py or a compiled file."""
+        rel = Path(*dotted.split("."))
+        for site in self.sites:
+            for cand in (site / rel.with_suffix(".py"), site / rel / "__init__.py"):
+                if cand.is_file():
+                    return cand
+            compiled = sorted((site / rel.parent).glob(rel.name + ".*.so")) + sorted((site / rel.parent).glob(rel.name + ".*.pyd"))
+            if compiled:
+                return compiled[0]
+            if (site / rel).is_dir():
+                return site / rel
+        return None
+
+    def site_names(self, dotted: str) -> set[str] | None:
+        """Top-level names of a module in the project's site-packages, read without importing it."""
+        if dotted in self._site_names:
+            return self._site_names[dotted]
+        path = self._site_file(dotted)
+        names: set[str] | None = None
+        if path is not None and path.suffix == ".py":
+            try:
+                tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
+            except SyntaxError:
+                tree = None
+            if tree is not None:
+                names = _top_names(tree.body)
+                if "__getattr__" in names or "*" in names:
+                    names = None
+        self._site_names[dotted] = names
+        return names
+
     def importable(self, top: str) -> bool:
         if top in self.local:
             return False
-        return top in sys.stdlib_module_names or self.installed(top)
+        return top in sys.stdlib_module_names or self._own(top)
 
     def module_exists(self, dotted: str) -> bool | None:
         """True: exists, False: definitely does not, None: unknown."""
@@ -423,7 +573,7 @@ class _Project:
         if top in self.local:
             return True if self._local_file(dotted) else None
         if not self.importable(top):
-            return None
+            return True if self._site_file(dotted) else None
         try:
             return importlib.util.find_spec(dotted) is not None
         except ModuleNotFoundError:
@@ -475,7 +625,10 @@ class _Project:
                 return None
             return name in names or self._local_file(f"{module}.{name}") is not None
         if not self.importable(top):
-            return None
+            names = self.site_names(module)
+            if names is None:
+                return None
+            return name in names or self._site_file(f"{module}.{name}") is not None
         mod = self.module(module)
         if mod is None:
             return None
@@ -493,6 +646,8 @@ class _Project:
                 return f'module "{target}" has no name "{chain[0]}"'
             return None
         if not self.importable(top):
+            if self._site_file(target) is not None and self.has_name(target, chain[0]) is False:
+                return f'module "{target}" has no name "{chain[0]}"'
             return None
         obj = self._object(target)
         path = target
@@ -565,12 +720,18 @@ def _rule_imports(f: _File, pr: _Project) -> list[Issue]:
             if not pr.external(top) or top in seen:
                 continue
             seen.add(top)
-            pkg = _norm_pkg(pr.cfg.import_map.get(top, top))
+            names = [pr.cfg.import_map[top]] if top in pr.cfg.import_map else []
+            names += sorted(pr.dists.get(top, ()))
+            candidates = [_norm_pkg(n) for n in [*names, top]]
+            pkg = next((c for c in candidates if c in pr.reqs), candidates[0])
             spec = pr.reqs.get(pkg)
-            where = ", ".join(pr.cfg.requirements)
-            if spec is None:
+            where = ", ".join(pr.req_files)
+            if not pr.req_files:
+                pr.no_requirements.append((f.rel, node.lineno, node.col_offset + 1))
+            elif spec is None:
+                label = f'package "{pkg}" (module "{top}")' if pkg != _norm_pkg(top) else f'package "{top}"'
                 issues.append(Issue(f.rel, node.lineno, node.col_offset + 1, "P1",
-                                    f'package "{top}" is not in {where} — it may be invented'))
+                                    f"{label} is not in {where} — it may be invented"))
             elif not (spec.startswith("@") or (spec.startswith("==") and "*" not in spec)):
                 issues.append(Issue(f.rel, node.lineno, node.col_offset + 1, "P1",
                                     f'version of "{pkg}" is not pinned with == (now: "{spec or "any"}")'))
@@ -715,7 +876,7 @@ def _rule_facts(f: _File, pr: _Project) -> list[Issue]:
                                 f'law article number typed by hand: "{m.group(0)}" — take it from the database'))
         for host in URL_RE.findall(node.value):
             host = host.lower().rstrip(".")
-            if not any(host == h or host.endswith("." + h) for h in cfg.allowed_url_hosts):
+            if not any(host == h or host.endswith("." + h) for h in [*cfg.allowed_url_hosts, *LOCAL_HOSTS]):
                 issues.append(Issue(f.rel, node.lineno, node.col_offset + 1, "P3",
                                     f'address "{host}" typed by hand — move it to a config or allowed_url_hosts'))
     return issues
@@ -757,6 +918,7 @@ class _Taint:
         self.record = False
         self.returns = False
         self.types_module = f.path.name == "proven_types.py"
+        self.current: ast.FunctionDef | ast.AsyncFunctionDef | None = None
 
     @staticmethod
     def _match(name: str, patterns: list[str]) -> bool:
@@ -777,8 +939,8 @@ class _Taint:
             return _dotted(node) in t or self.expr(node.value, t)
         if isinstance(node, ast.Call):
             name = _dotted(node.func)
-            if self._match(name, self.sanitizers):
-                return False
+            if self._match(name, self.sanitizers) or _last(name) == "Verified":
+                return False  # Verified(...) outside verify() is caught as a forgery on its own
             if self._match(name, self.sources) or _last(name) in self.tainted_funcs:
                 return True
             if name in self.PURE:
@@ -859,6 +1021,10 @@ class _Taint:
             elif isinstance(st, ast.Return):
                 if self.expr(st.value, t):
                     self.returns = True
+                    fn = self.current
+                    if fn is not None and not fn.name.startswith("_") and not _is_unverified(fn.returns):
+                        self._issue(st, f'public function "{fn.name}" returns unverified model output — '
+                                        'annotate it "-> Unverified" or return verify(...)')
             elif isinstance(st, (ast.For, ast.AsyncFor)):
                 inner = set(t)
                 self.bind(st.target, self.expr(st.iter, t), inner)
@@ -888,7 +1054,9 @@ class _Taint:
         params = [*args.posonlyargs, *args.args, *args.kwonlyargs, args.vararg, args.kwarg]
         t = {p.arg for p in params if p is not None and _is_unverified(p.annotation)}
         self.returns = False
+        self.current = fn
         self.block(fn.body, t)
+        self.current = None
         return self.returns
 
 
@@ -931,6 +1099,9 @@ def _rule_except(f: _File, pr: _Project) -> list[Issue]:
             continue
         where = (f.rel, node.lineno, node.col_offset + 1, "P5")
         reraises = bool(node.body) and isinstance(node.body[-1], ast.Raise) and node.body[-1].exc is None
+        body_lines = range(node.body[0].lineno, (node.end_lineno or node.body[0].lineno) + 1) if node.body else range(0)
+        if any(len(f.waivers.get(line, {}).get("P5", "")) >= 5 for line in body_lines):
+            continue  # the waiver with its reason is inside the handler: pass  # proven: allow P5: <why>
         if node.type is None and not reraises:
             issues.append(Issue(*where, "bare except catches everything, even Ctrl+C and program exit"))
         elif node.type is not None and _silent(node.body):
@@ -956,7 +1127,15 @@ def _test_problem(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> str | None:
     return None
 
 
-def _rule_tests(src: list[_File], tests: list[_File]) -> list[Issue]:
+def _rule_tests(src: list[_File], tests: list[_File], cfg: Config) -> list[Issue]:
+    if not any(_is_test_file(tf.path) for tf in tests):
+        public = sum(1 for f in src for node in f.tree.body
+                     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and not node.name.startswith("_"))
+        if not public:
+            return []
+        return [Issue(cfg.tests[0] if cfg.tests else "tests", 1, 1, "P6",
+                      f"no tests found in {', '.join(cfg.tests)}: {public} public function(s) and class(es) are not "
+                      'proven — write tests, or set disable = ["P6"] in proven.toml until there are some')]
     called: set[str] = set()
     referenced: set[str] = set()
     for tf in tests:
@@ -1063,7 +1242,12 @@ def check(cfg: Config, paths: list[str] | None = None, use_baseline: bool = True
             if code not in cfg.disable:
                 issues += rule(f, project)
     if "P6" not in cfg.disable:
-        issues += _rule_tests(src_files, test_files)
+        issues += _rule_tests(src_files, test_files, cfg)
+    if project.no_requirements and "P1" not in cfg.disable:
+        path, line, col = min(project.no_requirements)
+        issues.append(Issue(path, line, col, "P1",
+                            f"no requirements file found (looked for {', '.join(cfg.requirements)} in {cfg.root.as_posix()}): "
+                            f"{len(project.no_requirements)} external import(s) cannot be checked"))
     issues = _apply_waivers(issues, files)
     if use_baseline:
         issues = _apply_baseline(issues, cfg)
@@ -1199,7 +1383,9 @@ def _mcp_check(args: dict[str, object], check_installed: bool) -> tuple[str, dic
     else:
         targets = [str(start.resolve())]
     issues = check(cfg, targets)
-    return format_report(issues), {"accepted": not issues, "issues": [i.to_dict() for i in issues]}, False
+    m = measured(cfg)
+    return (f"{format_measured(m)}\n\n{format_report(issues)}",
+            {"accepted": not issues, "measured": m, "issues": [i.to_dict() for i in issues]}, False)
 
 
 def _mcp_tool(name: object, args: dict[str, object], check_installed: bool) -> tuple[str, dict[str, object] | None, bool]:
@@ -1278,11 +1464,12 @@ def _cmd_check(args: argparse.Namespace, stdin) -> int:
     start = Path(args.paths[0]) if args.paths else Path.cwd()
     cfg = load_config(start)
     issues = check(cfg, args.paths or None, use_baseline=not args.no_baseline)
+    m = measured(cfg)
     if args.json:
-        print(json.dumps({"accepted": not issues, "issues": [i.to_dict() for i in issues]},
+        print(json.dumps({"accepted": not issues, "measured": m, "issues": [i.to_dict() for i in issues]},
                          ensure_ascii=False, indent=2))
         return 1 if issues else 0
-    report = format_report(issues)
+    report = f"{format_measured(m)}\n\n{format_report(issues)}"
     if args.github:
         if issues:
             print(format_github(issues, cfg))
@@ -1312,7 +1499,7 @@ def _hook(kind: str, stdin) -> int:
             return 0
         issues = check(cfg)
     if issues:
-        print(format_report(issues), file=sys.stderr)
+        print(f"{format_measured(measured(cfg))}\n\n{format_report(issues)}", file=sys.stderr)
         return 2
     return 0
 
