@@ -1,4 +1,4 @@
-name: Proven
+name: Proven Judge
 description: Judge AI-written Python against hallucinations - invented packages and calls, facts from memory, unverified LLM output.
 author: ND SaaS Solutions
 branding:
