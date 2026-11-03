@@ -63,6 +63,11 @@ def test_p1_import_name_differs_from_package(tmp_path):
     assert codes(run(tmp_path, "import yaml\n", extra=extra), "P1") == []
 
 
+def test_p1_proven_types_comes_from_proven_judge(tmp_path):
+    extra = {"requirements.txt": "proven-judge==0.1.0\n"}
+    assert codes(run(tmp_path, "from proven_types import Fact\n", extra=extra), "P1") == []
+
+
 def test_p1_stdlib_local_and_optional_imports_pass(tmp_path):
     src = """
     import json

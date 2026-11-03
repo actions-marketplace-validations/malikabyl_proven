@@ -1,0 +1,7 @@
+- id: proven
+  name: proven
+  description: Judge AI-written Python code against hallucinations.
+  entry: proven check
+  language: python
+  types: [python]
+  pass_filenames: false

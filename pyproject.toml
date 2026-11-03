@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "proven-judge"
+dynamic = ["version"]
+description = "A judge for code written by AI: plain Python, rules against hallucinations."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "ND SaaS Solutions" }]
+keywords = ["ai", "llm", "hallucinations", "linter", "static-analysis", "code-review", "claude-code"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Quality Assurance",
+    "Topic :: Software Development :: Testing",
+]
+
+[project.urls]
+Homepage = "https://github.com/malikabyl/proven"
+Documentation = "https://github.com/malikabyl/proven/blob/main/SPEC.md"
+Issues = "https://github.com/malikabyl/proven/issues"
+
+[project.scripts]
+proven = "proven:main"
+
+[tool.setuptools]
+py-modules = ["proven", "proven_types"]
+
+[tool.setuptools.dynamic]
+version = { attr = "proven.VERSION" }

@@ -88,15 +88,44 @@ Proven: no issues. Code accepted.
 
 Python 3.11+. No dependencies — the standard library only.
 
-1. Copy `proven.py` and `proven_types.py` into your project.
-2. Create the settings: `python proven.py init`
-3. Check the code: `python proven.py check`
+```
+pip install proven-judge        # the package is "proven-judge", the command is "proven"
+proven init                     # create proven.toml
+proven check                    # check the project
+```
 
 Exit code: `0` — code accepted, `1` — there are issues. For machines there is `--json`.
 
 ```
-python proven.py rules          # list the rules
-python proven.py explain P4     # explain a rule
+proven rules                    # list the rules
+proven explain P4               # explain a rule
+```
+
+In your code, `from proven_types import Fact, Unverified, unverified, verify`, and add `proven-judge==0.1.0` to `requirements.txt` (P1 applies to Proven too).
+
+No installation at all: copy `proven.py` and `proven_types.py` into your project and run `python proven.py check`.
+
+### pre-commit
+
+```yaml
+# .pre-commit-config.yaml
+repos:
+  - repo: https://github.com/malikabyl/proven
+    rev: v0.1.0
+    hooks:
+      - id: proven
+```
+
+The hook checks the whole project, not only the changed files: P6 needs to see the tests.
+
+### GitHub Actions
+
+```yaml
+- uses: actions/setup-python@v5
+  with:
+    python-version: "3.12"
+- run: pip install proven-judge==0.1.0
+- run: proven check
 ```
 
 ## The loop with an AI model
@@ -151,9 +180,13 @@ PROMPT.md             a cheat sheet for an AI model
 examples/bad          code with hallucinations
 examples/good         the same code following the rules
 tests/                the judge's tests
+pyproject.toml        the proven-judge package
+.pre-commit-hooks.yaml the pre-commit hook
 .claude/settings.json the hook for Claude Code
-.github/workflows/    the check on GitHub
+.github/workflows/    the check on GitHub and the release to PyPI
 ```
+
+Releasing: bump `VERSION` in `proven.py`, then publish a GitHub release with the tag `vX.Y.Z`. The `release` workflow checks that the tag matches the version, builds the package and publishes it to PyPI.
 
 Check the judge itself:
 

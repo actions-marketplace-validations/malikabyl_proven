@@ -110,6 +110,7 @@ DEFAULT_IMPORT_MAP = {
     "attr": "attrs",
     "telegram": "python-telegram-bot",
     "pkg_resources": "setuptools",
+    "proven_types": "proven-judge",
 }
 
 # Kazakhstan's monthly index (MRP) and minimum wage (MZP) in Latin and Cyrillic, VAT, taxes, rates
