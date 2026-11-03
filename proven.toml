@@ -1,0 +1,5 @@
+# The judge checks itself.
+[proven]
+src = ["proven.py", "proven_types.py"]
+tests = ["tests"]
+requirements = ["requirements-dev.txt"]

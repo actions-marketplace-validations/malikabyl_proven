@@ -1,0 +1,3 @@
+# Example: one dependency is pinned, the other is not
+anthropic==0.69.0
+requests>=2.31

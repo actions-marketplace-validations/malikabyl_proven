@@ -1,0 +1,6 @@
+[proven]
+src = ["bad", "good"]
+tests = ["tests"]
+requirements = ["requirements.txt"]
+check_installed = false          # the example runs without installing the packages
+local_modules = ["proven_types"] # lives in the repository root
