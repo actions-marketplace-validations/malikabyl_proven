@@ -211,10 +211,12 @@ disable = []                       # for example ["P6"]
 | `proven.py check --no-baseline` | Show the old debt as well |
 | `proven.py check --hook post` | Claude Code hook mode after a file is edited |
 | `proven.py check --hook stop` | Claude Code hook mode before the work is finished |
+| `proven.py check --github` | Also print GitHub Actions annotations and a job summary |
 | `proven.py baseline` | Record the current issues as old debt |
 | `proven.py explain P4` | Explain a rule |
 | `proven.py rules` | List the rules |
 | `proven.py init` | Create `proven.toml` |
+| `proven.py mcp` | Run as an MCP server over stdio (`--no-installed-check` skips P1's installed check) |
 
 Report line format: `path:line:column  code  message`. At the end, how to fix each rule that came up.
 
@@ -223,3 +225,15 @@ Report line format: `path:line:column  code  message`. At the end, how to fix ea
 `--hook post` reads the event from stdin, takes `tool_input.file_path`, checks the project and shows the issues in that file only. If there are issues, the exit code is 2 and the report goes to stderr: Claude sees it and fixes the code.
 
 `--hook stop` checks the whole project before Claude finishes its work. If there are issues, the exit code is 2 and the work continues. If the event is marked `stop_hook_active`, the judge lets it through so as not to loop forever. This mode is not on in `.claude/settings.json` by default — add it if you do not want Claude to hand in work with issues.
+
+### MCP server
+
+`proven mcp` speaks the Model Context Protocol over stdio: one JSON-RPC message per line, protocol versions 2024-11-05 to 2025-11-25, tools only.
+
+| Tool | Arguments | Result |
+|------|-----------|--------|
+| `proven_check` | `path` — absolute path to the project or a file; `files` — optional list of files or folders | The report as text and `{"accepted": bool, "issues": [...]}` as structured content |
+| `proven_explain` | `code` — a rule code such as `P4` | The rule and how to fix a violation |
+| `proven_rules` | — | The list of rules |
+
+The tools only read code, but `proven_check` imports installed packages for P2, like the command line does. While a tool runs, anything the imported packages print goes to stderr, not into the protocol.

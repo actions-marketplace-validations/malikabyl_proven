@@ -1,0 +1,27 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.malikabyl/proven",
+  "title": "Proven",
+  "description": "Judge AI-written Python: no invented packages or calls, no facts from memory, verified LLM output.",
+  "repository": {
+    "url": "https://github.com/malikabyl/proven",
+    "source": "github"
+  },
+  "version": "0.1.0",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "registryBaseUrl": "https://pypi.org",
+      "identifier": "proven-judge",
+      "version": "0.1.0",
+      "runtimeHint": "uvx",
+      "transport": {
+        "type": "stdio"
+      },
+      "packageArguments": [
+        { "type": "positional", "value": "mcp" },
+        { "type": "positional", "value": "--no-installed-check" }
+      ]
+    }
+  ]
+}

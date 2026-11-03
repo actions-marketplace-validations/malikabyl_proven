@@ -11,6 +11,7 @@ output, swallowed errors and code without tests.
     python proven.py rules          list the rules
     python proven.py baseline       accept the current issues as old debt
     python proven.py init           create proven.toml
+    python proven.py mcp            run as an MCP server over stdio
 
 Standard library only, Python 3.11+.
 """
@@ -18,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import contextlib
 import importlib
 import importlib.util
 import io
@@ -1081,6 +1083,193 @@ def format_report(issues: list[Issue]) -> str:
     return "\n".join(lines)
 
 
+def _explain_text(code: str) -> str | None:
+    code = _norm_code(code)
+    if code not in RULES:
+        return None
+    title, text, hint = RULES[code]
+    return f"{code} — {title}\n\n{text}\n\nHow to fix: {hint}"
+
+
+def _rules_text() -> str:
+    return "\n".join(f"{code}  {title}" for code, (title, _, _) in RULES.items())
+
+
+# ---------------------------------------------------------------- GitHub
+
+def _gh_escape(text: str, prop: bool = False) -> str:
+    text = text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+    if prop:
+        text = text.replace(":", "%3A").replace(",", "%2C")
+    return text
+
+
+def format_github(issues: list[Issue], cfg: Config) -> str:
+    """GitHub Actions workflow commands: each issue becomes an annotation on its line."""
+    workspace = Path(os.environ.get("GITHUB_WORKSPACE") or Path.cwd()).resolve()
+    lines = []
+    for i in issues:
+        full = (cfg.root / i.path).resolve()
+        try:
+            path = full.relative_to(workspace).as_posix()
+        except ValueError:
+            path = full.as_posix()
+        title = f"{i.code} {RULES[i.code][0]}"
+        lines.append(f"::error file={_gh_escape(path, True)},line={i.line},col={i.col},"
+                     f"title={_gh_escape(title, True)}::{_gh_escape(f'{i.message}. {i.hint}')}")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------- MCP server
+
+# Handshake versions this server speaks; it only offers tools, which all of them support.
+MCP_VERSIONS = ("2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25")
+
+_READ_ONLY = {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}
+
+MCP_TOOLS = [
+    {
+        "name": "proven_check",
+        "title": "Check Python code with Proven",
+        "description": (
+            "Judge Python code written by AI against hallucinations: invented packages and calls, "
+            "facts typed from memory, unverified model output, swallowed errors, code without tests. "
+            "Returns every issue with the rule and how to fix it. Call it after writing or editing "
+            "Python code and fix every issue until the code is accepted. Note: to check names inside "
+            "installed packages, Proven imports them (rule P2)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string",
+                         "description": "Absolute path to the project folder (where proven.toml is) or to one file."},
+                "files": {"type": "array", "items": {"type": "string"},
+                          "description": "Optional: only these files or folders, absolute or relative to the project root."},
+            },
+            "required": ["path"],
+            "additionalProperties": False,
+        },
+        "annotations": _READ_ONLY,
+    },
+    {
+        "name": "proven_explain",
+        "title": "Explain a Proven rule",
+        "description": "Explain one Proven rule (P0-P6): what it requires and how to fix a violation.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"code": {"type": "string", "description": "Rule code, for example P4."}},
+            "required": ["code"],
+            "additionalProperties": False,
+        },
+        "annotations": _READ_ONLY,
+    },
+    {
+        "name": "proven_rules",
+        "title": "List the Proven rules",
+        "description": "List all Proven rules with their codes and titles.",
+        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+        "annotations": _READ_ONLY,
+    },
+]
+
+_MCP_INSTRUCTIONS = (
+    "Proven is a judge for AI-written Python. Nothing exists until it is proven. After you write or edit "
+    "Python code, call proven_check with the project path and fix every issue it reports, then check again. "
+    "Do not add waivers (# proven: allow ...) to get past the judge; ask the user instead."
+)
+
+
+def _mcp_check(args: dict[str, object], check_installed: bool) -> tuple[str, dict[str, object] | None, bool]:
+    path = args.get("path")
+    if not isinstance(path, str) or not path.strip():
+        return "path is required: the absolute path to the project folder or to a file", None, True
+    start = Path(path).expanduser()
+    if not start.exists():
+        return f"no such file or folder: {path}", None, True
+    files = args.get("files")
+    if files is not None and not (isinstance(files, list) and all(isinstance(f, str) for f in files)):
+        return "files must be a list of paths", None, True
+    cfg = load_config(start)
+    if not check_installed:
+        cfg.check_installed = False
+    if files:
+        targets: list[str] | None = [str(Path(f) if Path(f).is_absolute() else cfg.root / f) for f in files]
+    elif start.resolve() == cfg.root:
+        targets = None
+    else:
+        targets = [str(start.resolve())]
+    issues = check(cfg, targets)
+    return format_report(issues), {"accepted": not issues, "issues": [i.to_dict() for i in issues]}, False
+
+
+def _mcp_tool(name: object, args: dict[str, object], check_installed: bool) -> tuple[str, dict[str, object] | None, bool]:
+    if name == "proven_check":
+        return _mcp_check(args, check_installed)
+    if name == "proven_explain":
+        text = _explain_text(str(args.get("code", "")))
+        if text is None:
+            return f"There is no rule {args.get('code')}. Rules: {', '.join(RULES)}", None, True
+        return text, None, False
+    if name == "proven_rules":
+        return _rules_text(), None, False
+    return f"unknown tool: {name}", None, True
+
+
+def _mcp_error(msg_id: object, code: int, message: str) -> dict[str, object]:
+    return {"jsonrpc": "2.0", "id": msg_id, "error": {"code": code, "message": message}}
+
+
+def _mcp_handle(msg: dict[str, object], check_installed: bool) -> dict[str, object] | None:
+    method = msg.get("method")
+    if "id" not in msg:
+        return None  # a notification, such as notifications/initialized: no reply
+    msg_id = msg["id"]
+    params = msg.get("params") if isinstance(msg.get("params"), dict) else {}
+    if method == "initialize":
+        requested = params.get("protocolVersion")
+        result: dict[str, object] = {
+            "protocolVersion": requested if requested in MCP_VERSIONS else MCP_VERSIONS[-1],
+            "capabilities": {"tools": {"listChanged": False}},
+            "serverInfo": {"name": "proven", "title": "Proven", "version": VERSION},
+            "instructions": _MCP_INSTRUCTIONS,
+        }
+    elif method == "ping":
+        result = {}
+    elif method == "tools/list":
+        result = {"tools": MCP_TOOLS}
+    elif method == "tools/call":
+        arguments = params.get("arguments") if isinstance(params.get("arguments"), dict) else {}
+        try:
+            with contextlib.redirect_stdout(sys.stderr):  # imported packages must not write into the protocol
+                text, structured, is_error = _mcp_tool(params.get("name"), arguments, check_installed)
+        except (OSError, ValueError, tomllib.TOMLDecodeError) as exc:
+            text, structured, is_error = f"Proven could not check: {exc}", None, True
+        result = {"content": [{"type": "text", "text": text}], "isError": is_error}
+        if structured is not None:
+            result["structuredContent"] = structured
+    else:
+        return _mcp_error(msg_id, -32601, f"Method not found: {method}")
+    return {"jsonrpc": "2.0", "id": msg_id, "result": result}
+
+
+def serve_mcp(stdin, stdout, check_installed: bool = True) -> int:
+    """Serve MCP over stdio: one JSON-RPC message per line, tools only."""
+    for raw in stdin:
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            msg = json.loads(raw)
+        except json.JSONDecodeError:
+            reply: dict[str, object] | None = _mcp_error(None, -32700, "Parse error")
+        else:
+            reply = _mcp_handle(msg, check_installed) if isinstance(msg, dict) else _mcp_error(None, -32600, "Invalid request")
+        if reply is not None:
+            stdout.write(json.dumps(reply, ensure_ascii=False) + "\n")
+            stdout.flush()
+    return 0
+
+
 # ---------------------------------------------------------------- CLI
 
 def _cmd_check(args: argparse.Namespace, stdin) -> int:
@@ -1092,8 +1281,16 @@ def _cmd_check(args: argparse.Namespace, stdin) -> int:
     if args.json:
         print(json.dumps({"accepted": not issues, "issues": [i.to_dict() for i in issues]},
                          ensure_ascii=False, indent=2))
-    else:
-        print(format_report(issues))
+        return 1 if issues else 0
+    report = format_report(issues)
+    if args.github:
+        if issues:
+            print(format_github(issues, cfg))
+        summary = os.environ.get("GITHUB_STEP_SUMMARY")
+        if summary:
+            with open(summary, "a", encoding="utf-8") as fh:
+                fh.write(f"### Proven\n\n```\n{report}\n```\n")
+    print(report)
     return 1 if issues else 0
 
 
@@ -1121,19 +1318,24 @@ def _hook(kind: str, stdin) -> int:
 
 
 def _cmd_explain(args: argparse.Namespace) -> int:
-    code = _norm_code(args.code)
-    if code not in RULES:
+    text = _explain_text(args.code)
+    if text is None:
         print(f"There is no rule {args.code}. Rules: {', '.join(RULES)}")
         return 1
-    title, text, hint = RULES[code]
-    print(f"{code} — {title}\n\n{text}\n\nHow to fix: {hint}")
+    print(text)
     return 0
 
 
 def _cmd_rules() -> int:
-    for code, (title, _, _) in RULES.items():
-        print(f"{code}  {title}")
+    print(_rules_text())
     return 0
+
+
+def _cmd_mcp(args: argparse.Namespace) -> int:
+    for stream in (sys.stdin, sys.stdout):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8")
+    return serve_mcp(sys.stdin, sys.stdout, check_installed=not args.no_installed_check)
 
 
 def _cmd_baseline(args: argparse.Namespace) -> int:
@@ -1166,12 +1368,16 @@ def main(argv: list[str] | None = None, stdin=None) -> int:
     c.add_argument("--json", action="store_true", help="output as JSON")
     c.add_argument("--no-baseline", action="store_true", help="ignore the old debt")
     c.add_argument("--hook", choices=["post", "stop"], help="Claude Code hook mode")
+    c.add_argument("--github", action="store_true", help="also print GitHub Actions annotations and a job summary")
     e = sub.add_parser("explain", help="explain a rule")
     e.add_argument("code")
     sub.add_parser("rules", help="list the rules")
     b = sub.add_parser("baseline", help="record the current issues as old debt")
     b.add_argument("paths", nargs="*")
     sub.add_parser("init", help="create proven.toml")
+    m = sub.add_parser("mcp", help="run as an MCP server over stdio")
+    m.add_argument("--no-installed-check", action="store_true",
+                   help="skip P1's installed-package check (when the server runs in its own environment, as with uvx)")
     args = parser.parse_args(argv)
     if args.cmd == "check":
         return _cmd_check(args, stdin or sys.stdin)
@@ -1183,6 +1389,8 @@ def main(argv: list[str] | None = None, stdin=None) -> int:
         return _cmd_baseline(args)
     if args.cmd == "init":
         return _cmd_init()
+    if args.cmd == "mcp":
+        return _cmd_mcp(args)
     parser.print_help()
     return 0
 

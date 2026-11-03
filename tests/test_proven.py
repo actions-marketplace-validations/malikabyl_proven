@@ -397,3 +397,84 @@ def test_judge_accepts_itself():
 
 def test_version():
     assert proven.VERSION.count(".") == 2
+
+
+# ---------------------------------------------------------------- GitHub annotations
+
+def test_format_github(tmp_path, monkeypatch):
+    cfg = project(tmp_path, {"src/app.py": "MRP = 3932\n"})
+    monkeypatch.setenv("GITHUB_WORKSPACE", str(tmp_path))
+    out = proven.format_github(check(cfg), cfg)
+    assert out.startswith("::error file=src/app.py,line=1,col=1,title=P3 No facts from memory::")
+    assert proven._gh_escape("a:b,c%\n", prop=True) == "a%3Ab%2Cc%25%0A"
+
+
+def test_cli_check_github(tmp_path, monkeypatch, capsys):
+    project(tmp_path, {"src/app.py": "MRP = 3932\n"})
+    summary = tmp_path / "summary.md"
+    monkeypatch.setenv("GITHUB_WORKSPACE", str(tmp_path))
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+    assert main(["check", str(tmp_path / "src"), "--github"]) == 1
+    out = capsys.readouterr().out
+    assert "::error file=src/app.py,line=1" in out and "Code rejected" in out
+    assert summary.read_text(encoding="utf-8").startswith("### Proven")
+
+
+# ---------------------------------------------------------------- MCP server
+
+def mcp_session(messages, check_installed=False):
+    stdin = io.StringIO("\n".join(m if isinstance(m, str) else json.dumps(m) for m in messages) + "\n")
+    stdout = io.StringIO()
+    assert proven.serve_mcp(stdin, stdout, check_installed=check_installed) == 0
+    return [json.loads(line) for line in stdout.getvalue().splitlines()]
+
+
+def test_mcp_handshake_and_tools():
+    replies = mcp_session([
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+         "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t", "version": "1"}}},
+        {"jsonrpc": "2.0", "method": "notifications/initialized"},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+        {"jsonrpc": "2.0", "id": 3, "method": "ping"},
+        {"jsonrpc": "2.0", "id": 4, "method": "resources/list"},
+        "not json",
+    ])
+    init, tools, ping, unknown, parse_error = replies
+    assert init["result"]["protocolVersion"] == "2025-06-18"
+    assert init["result"]["serverInfo"]["version"] == proven.VERSION
+    assert [t["name"] for t in tools["result"]["tools"]] == ["proven_check", "proven_explain", "proven_rules"]
+    assert ping["result"] == {}
+    assert unknown["error"]["code"] == -32601
+    assert parse_error["error"]["code"] == -32700
+
+
+def test_mcp_unknown_protocol_version_gets_latest():
+    [init] = mcp_session([{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "1999-01-01"}}])
+    assert init["result"]["protocolVersion"] == proven.MCP_VERSIONS[-1]
+
+
+def test_mcp_check_explain_rules(tmp_path):
+    project(tmp_path, {"src/app.py": "MRP = 3932\n", "tests/test_app.py": "def test_x():\n    assert 1 + 1 == 2\n"})
+    call = lambda i, name, args: {"jsonrpc": "2.0", "id": i, "method": "tools/call", "params": {"name": name, "arguments": args}}
+    checked, one_file, explained, listed, missing, bad_rule = mcp_session([
+        call(1, "proven_check", {"path": str(tmp_path)}),
+        call(2, "proven_check", {"path": str(tmp_path), "files": ["src/app.py"]}),
+        call(3, "proven_explain", {"code": "p4"}),
+        call(4, "proven_rules", {}),
+        call(5, "proven_check", {"path": str(tmp_path / "nowhere")}),
+        call(6, "proven_explain", {"code": "P9"}),
+    ])
+    result = checked["result"]
+    assert result["isError"] is False and result["structuredContent"]["accepted"] is False
+    assert [i["code"] for i in result["structuredContent"]["issues"]] == ["P3"]
+    assert "Code rejected" in result["content"][0]["text"]
+    assert one_file["result"]["structuredContent"]["issues"][0]["path"] == "src/app.py"
+    assert "verify" in explained["result"]["content"][0]["text"]
+    assert "P6" in listed["result"]["content"][0]["text"]
+    assert missing["result"]["isError"] is True and bad_rule["result"]["isError"] is True
+
+
+def test_cli_mcp(monkeypatch, capsys):
+    monkeypatch.setattr(sys, "stdin", io.StringIO('{"jsonrpc": "2.0", "id": 7, "method": "ping"}\n'))
+    assert main(["mcp", "--no-installed-check"]) == 0
+    assert json.loads(capsys.readouterr().out) == {"jsonrpc": "2.0", "id": 7, "result": {}}

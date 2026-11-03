@@ -22,6 +22,28 @@ jobs:
       - name: Tests
         run: python -m pytest -q
 
+  action:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: The action accepts good code
+        uses: ./
+        with:
+          path: examples
+          args: good
+      - name: The action rejects bad code
+        id: bad
+        continue-on-error: true
+        uses: ./
+        with:
+          path: examples
+          args: bad
+      - name: Check that bad code failed
+        if: steps.bad.outcome != 'failure'
+        run: |
+          echo "::error::The action accepted examples/bad"
+          exit 1
+
   package:
     runs-on: ubuntu-latest
     steps:
@@ -34,6 +56,15 @@ jobs:
           pip install build==1.3.0 twine==6.2.0
           python -m build
           twine check dist/*
+      - name: Check server.json
+        run: |
+          python - <<'PY'
+          import json, proven
+          d = json.load(open("server.json"))
+          assert len(d["description"]) <= 100, "server.json description is longer than 100 characters"
+          assert d["version"] == d["packages"][0]["version"] == proven.VERSION, "server.json version differs from proven.VERSION"
+          assert f"mcp-name: {d['name']}" in open("README.md").read(), "README has no mcp-name marker"
+          PY
       - name: Install the wheel and run it
         run: |
           python -m venv /tmp/try
@@ -42,3 +73,4 @@ jobs:
           /tmp/try/bin/proven --version
           /tmp/try/bin/proven check good
           ! /tmp/try/bin/proven check bad
+          printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"ping"}' | /tmp/try/bin/proven-judge mcp | grep -q '"result": {}'

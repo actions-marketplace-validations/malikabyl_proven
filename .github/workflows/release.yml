@@ -1,7 +1,7 @@
 name: release
 
-# Publishes proven-judge to PyPI when a GitHub release is published.
-# Uses PyPI trusted publishing: no token is stored in the repository.
+# On a published GitHub release: build proven-judge, publish it to PyPI, then
+# publish the MCP server to the MCP Registry. Both use OIDC: no tokens are stored.
 on:
   release:
     types: [published]
@@ -14,10 +14,16 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Check that the tag matches the version
+      - name: Check that the tag, proven.VERSION and server.json agree
         run: |
-          version=$(python -c "import proven; print(proven.VERSION)")
-          [ "${GITHUB_REF_NAME}" = "v${version}" ] || { echo "::error::Tag ${GITHUB_REF_NAME} does not match version ${version}"; exit 1; }
+          python - <<'PY'
+          import json, os, proven
+          tag = os.environ["GITHUB_REF_NAME"]
+          d = json.load(open("server.json"))
+          versions = {"tag": tag.removeprefix("v"), "proven.VERSION": proven.VERSION,
+                      "server.json": d["version"], "server.json package": d["packages"][0]["version"]}
+          assert len(set(versions.values())) == 1, f"versions differ: {versions}"
+          PY
       - name: Build
         run: |
           pip install build==1.3.0 twine==6.2.0
@@ -28,7 +34,7 @@ jobs:
           name: dist
           path: dist/
 
-  publish:
+  pypi:
     needs: build
     runs-on: ubuntu-latest
     environment: pypi
@@ -40,3 +46,45 @@ jobs:
           name: dist
           path: dist/
       - uses: pypa/gh-action-pypi-publish@release/v1
+
+  mcp-registry:
+    needs: pypi
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      MCP_PUBLISHER_VERSION: v1.8.1
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - name: Download and verify mcp-publisher
+        run: |
+          set -euo pipefail
+          os="$(uname -s | tr '[:upper:]' '[:lower:]')"
+          arch="$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')"
+          archive="mcp-publisher_${os}_${arch}.tar.gz"
+          base_url="https://github.com/modelcontextprotocol/registry/releases/download/${MCP_PUBLISHER_VERSION}"
+          curl --fail --location --silent --show-error --output "$archive" "$base_url/$archive"
+          curl --fail --location --silent --show-error --output "$archive.sigstore.json" "$base_url/$archive.sigstore.json"
+          cosign verify-blob \
+            --bundle "$archive.sigstore.json" \
+            --certificate-identity "https://github.com/modelcontextprotocol/registry/.github/workflows/release.yml@refs/tags/${MCP_PUBLISHER_VERSION}" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            "$archive"
+          tar xzf "$archive" mcp-publisher
+          rm -f "$archive" "$archive.sigstore.json"
+      - name: Check server.json
+        run: ./mcp-publisher validate
+      - name: Authenticate to the MCP Registry
+        run: ./mcp-publisher login github-oidc
+      - name: Publish to the MCP Registry
+        # PyPI may take a minute to show the new version, so try a few times.
+        run: |
+          for attempt in 1 2 3 4 5; do
+            ./mcp-publisher publish && exit 0
+            echo "Attempt $attempt failed, waiting for PyPI"
+            sleep 30
+          done
+          exit 1

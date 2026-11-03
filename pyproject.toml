@@ -11,7 +11,7 @@ requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "ND SaaS Solutions" }]
-keywords = ["ai", "llm", "hallucinations", "linter", "static-analysis", "code-review", "claude-code"]
+keywords = ["ai", "llm", "hallucinations", "linter", "static-analysis", "code-review", "claude-code", "mcp", "mcp-server"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: Console",
@@ -31,6 +31,7 @@ Issues = "https://github.com/malikabyl/proven/issues"
 
 [project.scripts]
 proven = "proven:main"
+proven-judge = "proven:main"
 
 [tool.setuptools]
 py-modules = ["proven", "proven_types"]

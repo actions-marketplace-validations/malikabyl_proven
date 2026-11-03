@@ -1,0 +1,35 @@
+name: Proven
+description: Judge AI-written Python against hallucinations - invented packages and calls, facts from memory, unverified LLM output.
+author: ND SaaS Solutions
+branding:
+  icon: check-circle
+  color: blue
+
+inputs:
+  path:
+    description: Folder to run in (the project with proven.toml, or a folder inside it).
+    required: false
+    default: "."
+  args:
+    description: Extra arguments for "proven check", for example "src" or "--no-baseline".
+    required: false
+    default: ""
+  python:
+    description: The Python to run the judge with. Use the one your dependencies are installed in, so P1 and P2 can see them.
+    required: false
+    default: python3
+
+runs:
+  using: composite
+  steps:
+    - name: Proven check
+      shell: bash
+      working-directory: ${{ inputs.path }}
+      env:
+        PROVEN_ARGS: ${{ inputs.args }}
+        PROVEN_PYTHON: ${{ inputs.python }}
+      run: |
+        # proven_types comes with the action, so code that imports it is checked as installed
+        export PYTHONPATH="${GITHUB_ACTION_PATH}${PYTHONPATH:+:$PYTHONPATH}"
+        # PROVEN_ARGS is split into words on purpose
+        "$PROVEN_PYTHON" "$GITHUB_ACTION_PATH/proven.py" check --github $PROVEN_ARGS

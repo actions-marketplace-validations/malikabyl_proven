@@ -1,5 +1,7 @@
 # Proven
 
+<!-- mcp-name: io.github.malikabyl/proven -->
+
 **A judge for code written by AI.** The syntax is plain Python. The rules are against hallucinations.
 
 The core principle: **nothing exists until it is proven.** A package exists if it is pinned in requirements. A function exists if it is in the installed version. A fact exists if it has a source and a date. A model's answer exists for the user once it has passed a check. A function works if a test proves it.
@@ -121,12 +123,36 @@ The hook checks the whole project, not only the changed files: P6 needs to see t
 ### GitHub Actions
 
 ```yaml
-- uses: actions/setup-python@v5
-  with:
-    python-version: "3.12"
-- run: pip install proven-judge==0.1.0
-- run: proven check
+- uses: actions/checkout@v4
+- uses: malikabyl/proven@v0.1.0
 ```
+
+Issues show up as annotations on the lines of the pull request and in the job summary. Inputs: `path` (the folder to run in), `args` (extra arguments for `proven check`), `python` (the interpreter with your dependencies installed, so P1 and P2 can see them; by default `python3`). Outside the action, `proven check --github` gives the same annotations.
+
+### MCP server
+
+Proven is also an MCP server, so an AI agent can call the judge itself: tools `proven_check`, `proven_explain` and `proven_rules`. It needs no extra packages.
+
+Claude Code:
+
+```
+claude mcp add proven -- uvx proven-judge mcp --no-installed-check
+```
+
+Other clients (Claude Desktop, Cursor and others):
+
+```json
+{
+  "mcpServers": {
+    "proven": {
+      "command": "uvx",
+      "args": ["proven-judge", "mcp", "--no-installed-check"]
+    }
+  }
+}
+```
+
+`uvx` runs the server in its own environment, where your project's packages are not installed, hence `--no-installed-check`. To check that packages are installed too (P1), run the server from your project's environment instead: `pip install proven-judge`, then `proven mcp`. Pass the agent an absolute path to the project.
 
 ## The loop with an AI model
 
@@ -181,12 +207,14 @@ examples/bad          code with hallucinations
 examples/good         the same code following the rules
 tests/                the judge's tests
 pyproject.toml        the proven-judge package
+action.yml            the GitHub Action
+server.json           the MCP Registry entry
 .pre-commit-hooks.yaml the pre-commit hook
 .claude/settings.json the hook for Claude Code
 .github/workflows/    the check on GitHub and the release to PyPI
 ```
 
-Releasing: bump `VERSION` in `proven.py`, then publish a GitHub release with the tag `vX.Y.Z`. The `release` workflow checks that the tag matches the version, builds the package and publishes it to PyPI.
+Releasing: bump `VERSION` in `proven.py`, then publish a GitHub release with the tag `vX.Y.Z`. The `release` workflow checks that the tag, `VERSION` and `server.json` agree, builds the package, publishes it to PyPI and then to the MCP Registry. Update the two versions in `server.json` together with `VERSION`.
 
 Check the judge itself:
 
